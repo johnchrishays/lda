@@ -1,3 +1,4 @@
+import argparse
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
@@ -113,6 +114,13 @@ def train_models(sample_X, sample_y, population_X, population_y, model_classes, 
     return results_df
     
 if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-i', type=int, required=False, dest='fileno')
+    args = parser.parse_args()
+    fileno = args.fileno
+    if fileno is None:
+        fileno = 0
     datasets = [adult, folktables, hmda]
     dataset_names = ['adult', 'folktables', 'hmda']
     for i, dataset in enumerate(datasets):
@@ -121,4 +129,4 @@ if __name__ == "__main__":
         sample_dataset_X = sample_dataset.drop(columns=['y'])
         sample_dataset_y = sample_dataset['y']
         results_df = train_models(sample_dataset_X, sample_dataset_y, dataset.drop(columns=['y']), dataset['y'], model_classes, B)
-        results_df.to_csv(f"results_data/{dataset_names[i]}_results.csv", index=False)
+        results_df.to_csv(f"results_data/{dataset_names[i]}_results_{fileno}.csv", index=False)
