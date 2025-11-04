@@ -13,9 +13,9 @@ from sklearn.preprocessing import StandardScaler
 
 from folktables import ACSDataSource, ACSEmployment
 
-from ucimlrepo import fetch_ucirepo 
+from fairlearn.reductions import ExponentiatedGradient, DemographicParity, ErrorRate
   
-B = 10 # number of bootstrap samples
+B = 1000 # number of bootstrap samples
 
 scaler = StandardScaler()
 
@@ -68,7 +68,7 @@ hmda['ref_group_indicator'] = hmda_protected['applicant_race_1'] == 5
 hmda = pd.get_dummies(hmda, columns=['owner_occupancy', 'has_co_applicant'], drop_first=True)
 hmda[['loan_amount_000s', 'applicant_income_000s', 'hud_median_family_income', 'tract_to_msamd_income', 'population', 'minority_population', 'number_of_owner_occupied_units', 'number_of_1_to_4_family_units']] = scaler.fit_transform(hmda[['loan_amount_000s', 'applicant_income_000s', 'hud_median_family_income', 'tract_to_msamd_income', 'population', 'minority_population', 'number_of_owner_occupied_units', 'number_of_1_to_4_family_units']])
 
-model_classes = ['logistic', 'RF', 'nn']
+model_classes = ['logistic', 'RF', 'nn', 'fl_logistic', 'fl_RF', 'fl_nn']
 
 ##### MODEL TRAINING #####
 
@@ -78,26 +78,27 @@ def train_models(sample_X, sample_y, population_X, population_y, model_classes, 
         X_train, X_eval, y_train, y_eval = train_test_split(sample_X, sample_y, test_size=0.5, random_state=seed)
         
         it_results = {}
-        neg_flag = False
         for model_class in model_classes:
-            if model_class == 'logistic':
+            if 'logistic' in model_class:
                 model = LogisticRegression()
-            elif model_class == 'RF':
+            elif 'RF' in model_class:
                 model = RandomForestClassifier(n_estimators=10, max_depth=5, random_state=seed)
-            elif model_class == 'nn':
+            elif 'nn' in model_class:
                 model = MLPClassifier(hidden_layer_sizes=(25,), max_iter=600, random_state=seed)
-            model.fit(X_train, y_train)
+            if 'fl_' in model_class:
+                objective = ErrorRate(costs={'fp': 0.5, 'fn': 0.5})
+                model = ExponentiatedGradient(model, constraints=DemographicParity(difference_bound=0.05), objective=objective)
+                model.fit(X_train, y_train, sensitive_features=X_train["ref_group_indicator"])
+            else:
+                model.fit(X_train, y_train)
             training_accuracy = accuracy_score(y_train, model.predict(X_train))
             eval_accuracy = accuracy_score(y_eval, model.predict(X_eval))
             df_accuracy = accuracy_score(population_y, model.predict(population_X))
 
-            training_SRG = srg_score(model.predict(X_train), X_train["ref_group_indicator"])
-            eval_SRG = srg_score(model.predict(X_eval), X_eval["ref_group_indicator"])
-            df_SRG = srg_score(model.predict(population_X), population_X["ref_group_indicator"])
-            if eval_SRG <= 0:
-                neg_flag = True
-            if df_SRG <= 0:
-                neg_flag = True
+
+            training_SRG = np.abs(srg_score(model.predict(X_train), X_train["ref_group_indicator"]))
+            eval_SRG = np.abs(srg_score(model.predict(X_eval), X_eval["ref_group_indicator"]))
+            df_SRG = np.abs(srg_score(model.predict(population_X), population_X["ref_group_indicator"]))
 
             it_results.update({
                 f'{model_class}_training_accuracy': training_accuracy,
@@ -107,8 +108,6 @@ def train_models(sample_X, sample_y, population_X, population_y, model_classes, 
                 f'{model_class}_eval_SRG': eval_SRG,
                 f'{model_class}_df_SRG': df_SRG
             })
-        if neg_flag:
-            continue
         results.append(it_results)
     results_df = pd.DataFrame(results)
     return results_df
