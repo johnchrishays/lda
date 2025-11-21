@@ -2,7 +2,7 @@ import argparse
 import pandas as pd
 import math
 import matplotlib.pyplot as plt
-
+from tqdm import tqdm
 
 plt.rcParams['text.usetex'] = True
 plt.rcParams['font.family'] = 'serif'
@@ -11,9 +11,10 @@ plt.rcParams['font.serif'] = ['Computer Modern']
 datasets = ['adult', 'folktables', 'hmda']
 dataset_names = {'adult': 'Adult', 'folktables': 'Folktables', 'hmda': 'HMDA'}
 
-model_classes = ['logistic', 'RF', 'nn', 'fl_logistic', 'fl_RF', 'fl_nn']
+model_classes = ['logistic', 'RF', 'mlp', 'gbt']
+# model_classes = model_classes + ['fl_' + model_class for model_class in model_classes]
 
-def compute_true_cei(df, u, true_u, model_class):
+def compute_expected_marginal_gain(df, u, true_u, model_class):
     filtered_rows = df[df[f'{model_class}_eval_SRG'] < u]
     if len(filtered_rows) == 0:
         return 0
@@ -27,7 +28,7 @@ def compute_no_assm_and_true_cei(df, B, T, model_class, i):
 
 
     miscovered = 0
-    for b in range(B):
+    for b in tqdm(range(B)):
         u_hat_t = 1
         bound_no_assm = []
         true_cei = []
@@ -35,7 +36,6 @@ def compute_no_assm_and_true_cei(df, B, T, model_class, i):
         resampled_df = df.sample(frac=1, replace=True).reset_index(drop=True)
         miscovered_i = False
 
-        # compute UB on the true CEI
         for t in range(T):
             if t == 0:
                 p_t = 1 - math.exp(-1/delta)
@@ -45,7 +45,7 @@ def compute_no_assm_and_true_cei(df, B, T, model_class, i):
             u_hat_t = resampled_df.loc[i_t, f"{model_class}_eval_SRG"]
             u_t = resampled_df.loc[i_t, f"{model_class}_df_SRG"]
             bound_no_assm.append(u_hat_t * p_t)
-            true_marginal_gain = compute_true_cei(df, u_hat_t, u_t, model_class)
+            true_marginal_gain = compute_expected_marginal_gain(df, u_hat_t, u_t, model_class)
             true_cei.append(true_marginal_gain)
             if u_hat_t * p_t < true_marginal_gain and not miscovered_i:
                 miscovered += 1
@@ -64,9 +64,15 @@ def compute_no_assm_and_true_cei(df, B, T, model_class, i):
         "true_cei_means": true_cei_means.to_list(),
         "no_assm_sds": no_assm_sds.to_list(),
         "true_cei_sds": true_cei_sds.to_list(),
+        "miscovered": miscovered/B,
     }
-    print(miscovered/B)
     saved_data = pd.DataFrame(saved_data)
+    # file_path = f'algo_data/{dataset}_{model_class}_{i}.csv'
+    # if os.path.exists(file_path):
+    #     existing_data = pd.read_csv(file_path, index_col=0)
+    #     for col in saved_data.columns:
+    #         existing_data[col] = saved_data[col]
+    #     saved_data = existing_data
     saved_data.to_csv(f'algo_data/{dataset}_{model_class}_{i}.csv')
         
 def compute_mrl_assm_and_true_cei(df, B, T, model_class, i):
@@ -115,7 +121,7 @@ def compute_mrl_assm_and_true_cei(df, B, T, model_class, i):
             mu_bar_t = min(u_hat_t, mubar_eb)
             u_t = resampled_df.loc[i_t, f"{model_class}_df_SRG"]
             bound_mrl_assm.append(mu_bar_t * p_t)
-            true_cei.append(compute_true_cei(df, u_hat_t, u_t, model_class))
+            true_cei.append(compute_expected_marginal_gain(df, u_hat_t, u_t, model_class))
         mrl_assm_df.loc[b] = bound_mrl_assm
         true_cei_df.loc[b] = true_cei
 
@@ -134,20 +140,21 @@ def compute_mrl_assm_and_true_cei(df, B, T, model_class, i):
     saved_data = pd.DataFrame(saved_data)
     saved_data.to_csv(f'algo_data/{dataset}_{model_class}_mrl_{i}.csv')
 
-delta = 0.05
+if __name__ == "__main__":
+    delta = 0.05
 
-max_num_datasets = 10
-B = 100
-T = 100 # number of model training iterations
-parser = argparse.ArgumentParser()
-parser.add_argument('-i', type=int, required=False, dest='fileno')
-args = parser.parse_args()
-fileno = args.fileno
-if fileno is None:
-    fileno = 0
-for dataset in datasets:
-    for model_class in model_classes:
-        print(dataset, model_class)
-        results = pd.read_csv(f'results_data/{dataset}_results_{fileno}.csv')
-        compute_no_assm_and_true_cei(results, B, T, model_class, fileno)
-        compute_mrl_assm_and_true_cei(results, B, T, model_class, fileno)
+    B = 1000
+    T = 100 # number of model training iterations
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-i', type=int, required=False, dest='fileno')
+    args = parser.parse_args()
+    fileno = args.fileno
+    if fileno is None:
+        fileno = 0
+    for dataset in datasets:
+        print(dataset)
+        for model_class in model_classes:
+            print(model_class)
+            results = pd.read_csv(f'results_data/{dataset}_results_{fileno}.csv')
+            compute_no_assm_and_true_cei(results, B, T, model_class, fileno)
+            # compute_mrl_assm_and_true_cei(results, B, T, model_class, fileno)

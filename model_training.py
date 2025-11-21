@@ -2,10 +2,13 @@ import argparse
 import pandas as pd
 import numpy as np
 from tqdm import tqdm
+import time
+import os
 
 from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier, HistGradientBoostingClassifier
+from sklearn import svm
+from sklearn.neighbors import KNeighborsClassifier
 from sklearn.neural_network import MLPClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
@@ -15,7 +18,7 @@ from folktables import ACSDataSource, ACSEmployment
 
 from fairlearn.reductions import ExponentiatedGradient, DemographicParity, ErrorRate
   
-B = 1000 # number of bootstrap samples
+B = 5000 # number of models to train
 
 scaler = StandardScaler()
 
@@ -66,31 +69,41 @@ hmda = hmda[['owner_occupancy', 'loan_amount_000s', 'msamd', 'applicant_income_0
 hmda['y'] = hmda_labels['action_taken'] == 1
 hmda['ref_group_indicator'] = hmda_protected['applicant_race_1'] == 5
 hmda = pd.get_dummies(hmda, columns=['owner_occupancy', 'has_co_applicant'], drop_first=True)
-hmda[['loan_amount_000s', 'applicant_income_000s', 'hud_median_family_income', 'tract_to_msamd_income', 'population', 'minority_population', 'number_of_owner_occupied_units', 'number_of_1_to_4_family_units']] = scaler.fit_transform(hmda[['loan_amount_000s', 'applicant_income_000s', 'hud_median_family_income', 'tract_to_msamd_income', 'population', 'minority_population', 'number_of_owner_occupied_units', 'number_of_1_to_4_family_units']])
+# hmda[['applicant_income_000s', 'hud_median_family_income', 'tract_to_msamd_income', 'population', 'minority_population', 'number_of_owner_occupied_units', 'number_of_1_to_4_family_units']] = scaler.fit_transform(hmda[['applicant_income_000s', 'hud_median_family_income', 'tract_to_msamd_income', 'population', 'minority_population', 'number_of_owner_occupied_units', 'number_of_1_to_4_family_units']])
 
-model_classes = ['logistic', 'RF', 'nn', 'fl_logistic', 'fl_RF', 'fl_nn']
+model_classes = ['logistic', 'RF', 'mlp', 'gbt']
+# model_classes = model_classes + ['fl_' + model_class for model_class in model_classes]
+# model_classes = ['fl_' + model_class for model_class in model_classes]
 
 ##### MODEL TRAINING #####
 
 def train_models(sample_X, sample_y, population_X, population_y, model_classes, B):
     results = []
     for seed in tqdm(range(B)):
-        X_train, X_eval, y_train, y_eval = train_test_split(sample_X, sample_y, test_size=0.5, random_state=seed)
+        X_train, X_eval, y_train, y_eval = train_test_split(sample_X, sample_y, test_size=0.3, random_state=seed)
         
         it_results = {}
         for model_class in model_classes:
+            start_time = time.time()
+            print(f"Training model: {model_class} at time {time.strftime('%Y-%m-%d %H:%M:%S')}")
             if 'logistic' in model_class:
-                model = LogisticRegression()
+                model = LogisticRegression(max_iter=2400, random_state=seed)
             elif 'RF' in model_class:
                 model = RandomForestClassifier(n_estimators=10, max_depth=5, random_state=seed)
-            elif 'nn' in model_class:
-                model = MLPClassifier(hidden_layer_sizes=(25,), max_iter=600, random_state=seed)
+            elif 'mlp' in model_class:
+                model = MLPClassifier(hidden_layer_sizes=(25,), max_iter=2400, random_state=seed)
+            elif 'gbt' in model_class:
+                model = HistGradientBoostingClassifier(max_iter=100, random_state=seed)
+            elif 'svm' in model_class:
+                model = svm.SVC(kernel='rbf', random_state=seed)
             if 'fl_' in model_class:
                 objective = ErrorRate(costs={'fp': 0.5, 'fn': 0.5})
                 model = ExponentiatedGradient(model, constraints=DemographicParity(difference_bound=0.05), objective=objective)
                 model.fit(X_train, y_train, sensitive_features=X_train["ref_group_indicator"])
             else:
                 model.fit(X_train, y_train)
+            end_time = time.time()
+            print(f"Finished training model: {model_class} in {end_time - start_time:.1f} seconds")
             training_accuracy = accuracy_score(y_train, model.predict(X_train))
             eval_accuracy = accuracy_score(y_eval, model.predict(X_eval))
             df_accuracy = accuracy_score(population_y, model.predict(population_X))
@@ -128,4 +141,10 @@ if __name__ == "__main__":
         sample_dataset_X = sample_dataset.drop(columns=['y'])
         sample_dataset_y = sample_dataset['y']
         results_df = train_models(sample_dataset_X, sample_dataset_y, dataset.drop(columns=['y']), dataset['y'], model_classes, B)
+        existing_results_path = f"results_data/{dataset_names[i]}_results_{fileno}.csv"
+        if os.path.exists(existing_results_path):
+            existing_results_df = pd.read_csv(existing_results_path)
+            for col in results_df.columns:
+                existing_results_df[col] = results_df[col]
+            results_df = existing_results_df
         results_df.to_csv(f"results_data/{dataset_names[i]}_results_{fileno}.csv", index=False)
