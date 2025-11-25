@@ -65,40 +65,51 @@ hmda = pd.read_csv('data/2017-NY-features.csv')
 hmda_labels = pd.read_csv('data/2017-NY-target.csv')
 hmda_protected= pd.read_csv('data/2017-NY-protected.csv')
 
-hmda = hmda[['owner_occupancy', 'loan_amount_000s', 'msamd', 'applicant_income_000s', 'hud_median_family_income', 'tract_to_msamd_income', 'has_co_applicant', 'population', 'minority_population', 'number_of_owner_occupied_units', 'number_of_1_to_4_family_units']]
+# hmda = hmda[['owner_occupancy', 'loan_amount_000s', 'msamd', 'applicant_income_000s', 'hud_median_family_income', 'tract_to_msamd_income', 'has_co_applicant', 'population', 'minority_population', 'number_of_owner_occupied_units', 'number_of_1_to_4_family_units']]
+text_features = hmda.select_dtypes(include=['object']).columns
+hmda['has_co_applicant'] = hmda['has_co_applicant'].fillna(-1)
+hmda = pd.get_dummies(hmda, columns=['has_co_applicant'], drop_first=True)
+
+if len(text_features) > 0:
+    hmda = pd.get_dummies(hmda, columns=text_features, drop_first=True)
+hmda.drop(columns=['sequence_number'], inplace=True)
+
 hmda['y'] = hmda_labels['action_taken'] == 1
 hmda['ref_group_indicator'] = hmda_protected['applicant_race_1'] == 5
-hmda = pd.get_dummies(hmda, columns=['owner_occupancy', 'has_co_applicant'], drop_first=True)
-# hmda[['applicant_income_000s', 'hud_median_family_income', 'tract_to_msamd_income', 'population', 'minority_population', 'number_of_owner_occupied_units', 'number_of_1_to_4_family_units']] = scaler.fit_transform(hmda[['applicant_income_000s', 'hud_median_family_income', 'tract_to_msamd_income', 'population', 'minority_population', 'number_of_owner_occupied_units', 'number_of_1_to_4_family_units']])
 
-model_classes = ['logistic', 'RF', 'mlp', 'gbt']
-# model_classes = model_classes + ['fl_' + model_class for model_class in model_classes]
-# model_classes = ['fl_' + model_class for model_class in model_classes]
+run_with_fairlearn = False
+model_classes = ['logistic', 'RF', 'gbt']
+if run_with_fairlearn:
+    model_classes = ['fl_' + model_class for model_class in model_classes]
 
 ##### MODEL TRAINING #####
 
-def train_models(sample_X, sample_y, population_X, population_y, model_classes, B):
+def train_models(sample_X, sample_y, population_X, population_y, model_classes, B, master_seed=0):
     results = []
-    for seed in tqdm(range(B)):
-        X_train, X_eval, y_train, y_eval = train_test_split(sample_X, sample_y, test_size=0.3, random_state=seed)
+    rng = np.random.default_rng(master_seed)
+    seeds_data = rng.integers(0, 2**31, size=B)
+    seeds_models = rng.integers(0, 2**31, size=B)
+    for b in tqdm(range(B)):
+        X_train, X_eval, y_train, y_eval = train_test_split(sample_X, sample_y, test_size=0.3, random_state=seeds_data[b])
         
         it_results = {}
         for model_class in model_classes:
             start_time = time.time()
             print(f"Training model: {model_class} at time {time.strftime('%Y-%m-%d %H:%M:%S')}")
             if 'logistic' in model_class:
-                model = LogisticRegression(max_iter=2400, random_state=seed)
+                model = LogisticRegression(max_iter=2400, random_state=seeds_models[b])
             elif 'RF' in model_class:
-                model = RandomForestClassifier(n_estimators=10, max_depth=5, random_state=seed)
+                model = RandomForestClassifier(n_estimators=10, max_depth=5, random_state=seeds_models[b])
             elif 'mlp' in model_class:
-                model = MLPClassifier(hidden_layer_sizes=(25,), max_iter=2400, random_state=seed)
+                # model = MLPClassifier(hidden_layer_sizes=(25,), max_iter=2400, random_state=seed)
+                model = MLPClassifier(hidden_layer_sizes=(25,25,), random_state=seeds_models[b])
             elif 'gbt' in model_class:
-                model = HistGradientBoostingClassifier(max_iter=100, random_state=seed)
+                model = HistGradientBoostingClassifier(max_iter=100, random_state=seeds_models[b])
             elif 'svm' in model_class:
-                model = svm.SVC(kernel='rbf', random_state=seed)
+                model = svm.SVC(kernel='rbf', random_state=seeds_models[b])
             if 'fl_' in model_class:
                 objective = ErrorRate(costs={'fp': 0.5, 'fn': 0.5})
-                model = ExponentiatedGradient(model, constraints=DemographicParity(difference_bound=0.05), objective=objective)
+                model = ExponentiatedGradient(model, constraints=DemographicParity(difference_bound=0.2), objective=objective)
                 model.fit(X_train, y_train, sensitive_features=X_train["ref_group_indicator"])
             else:
                 model.fit(X_train, y_train)
@@ -137,14 +148,17 @@ if __name__ == "__main__":
     dataset_names = ['adult', 'folktables', 'hmda']
     for i, dataset in enumerate(datasets):
         print(dataset_names[i])
-        sample_dataset = dataset.sample(n=3000, replace=True)
+        sample_dataset = dataset.sample(n=3000, replace=True, random_state=fileno)
         sample_dataset_X = sample_dataset.drop(columns=['y'])
         sample_dataset_y = sample_dataset['y']
-        results_df = train_models(sample_dataset_X, sample_dataset_y, dataset.drop(columns=['y']), dataset['y'], model_classes, B)
-        existing_results_path = f"results_data/{dataset_names[i]}_results_{fileno}.csv"
-        if os.path.exists(existing_results_path):
-            existing_results_df = pd.read_csv(existing_results_path)
-            for col in results_df.columns:
-                existing_results_df[col] = results_df[col]
-            results_df = existing_results_df
-        results_df.to_csv(f"results_data/{dataset_names[i]}_results_{fileno}.csv", index=False)
+        results_df = train_models(sample_dataset_X, sample_dataset_y, dataset.drop(columns=['y']), dataset['y'], model_classes, B, master_seed=fileno)
+        if run_with_fairlearn:
+            existing_results_path = f"results_data/{dataset_names[i]}_fairlearn_results_{fileno}.csv"
+        else:
+            existing_results_path = f"results_data/{dataset_names[i]}_results_{fileno}.csv"
+        # if os.path.exists(existing_results_path):
+        #     existing_results_df = pd.read_csv(existing_results_path)
+        #     for col in results_df.columns:
+        #         existing_results_df[col] = results_df[col]
+        #     results_df = existing_results_df
+        results_df.to_csv(existing_results_path, index=False)
