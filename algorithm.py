@@ -1,18 +1,11 @@
 import argparse
 import pandas as pd
 import math
-import matplotlib.pyplot as plt
 from tqdm import tqdm
-
-plt.rcParams['text.usetex'] = True
-plt.rcParams['font.family'] = 'serif'
-plt.rcParams['font.serif'] = ['Computer Modern']
 
 datasets = ['adult', 'folktables', 'hmda']
 dataset_names = {'adult': 'Adult', 'folktables': 'Folktables', 'hmda': 'HMDA'}
 
-model_classes = ['logistic', 'RF', 'mlp', 'gbt']
-# model_classes = model_classes + ['fl_' + model_class for model_class in model_classes]
 
 def compute_expected_marginal_gain(df, u, true_u, model_class):
     filtered_rows = df[df[f'{model_class}_eval_SRG'] < u]
@@ -20,59 +13,93 @@ def compute_expected_marginal_gain(df, u, true_u, model_class):
         return 0
     return (true_u - filtered_rows[f'{model_class}_df_SRG'].mean()) * len(filtered_rows) / len(df)
 
+def compute_expected_marginal_gain_inf_data(df, u, true_u, model_class):
+    filtered_rows = df[df[f'{model_class}_df_SRG'] < u]
+    if len(filtered_rows) == 0:
+        return 0
+    return (true_u - filtered_rows[f'{model_class}_df_SRG'].mean()) * len(filtered_rows) / len(df)
 
 def compute_no_assm_and_true_cei(df, B, T, model_class, i):
 
     no_assm_df = pd.DataFrame(index=range(B), columns=[f'bound_no_assm_{t}' for t in range(T)])
     true_cei_df = pd.DataFrame(index=range(B), columns=[f'true_cei_{t}' for t in range(T)])
+    no_assm_inf_data_df = pd.DataFrame(index=range(B), columns=[f'bound_no_assm_inf_data_{t}' for t in range(T)])
+    true_cei_inf_data_df = pd.DataFrame(index=range(B), columns=[f'true_cei_inf_data_{t}' for t in range(T)])
 
 
     miscovered = 0
+    miscovered_inf_data = 0
     for b in tqdm(range(B)):
         u_hat_t = 1
+        u_t_infinte_data = 1
         bound_no_assm = []
+        bound_no_assm_inf_data = []
         true_cei = []
+        true_cei_inf_data = []
 
         resampled_df = df.sample(frac=1, replace=True).reset_index(drop=True)
         miscovered_i = False
-
+        miscovered_inf_data_i = False
+        p_t_list = []
         for t in range(T):
             if t == 0:
                 p_t = 1 - math.exp(-1/delta)
             else:
                 p_t = 1 - (t/delta + 1)**(-1/t)
+            p_t_list.append(p_t)
+
+        for t in range(T):
+            # Finite data
             i_t = i_t if u_hat_t < resampled_df.loc[t, f"{model_class}_eval_SRG"] else t
             u_hat_t = resampled_df.loc[i_t, f"{model_class}_eval_SRG"]
             u_t = resampled_df.loc[i_t, f"{model_class}_df_SRG"]
-            bound_no_assm.append(u_hat_t * p_t)
+            bound_no_assm.append(u_hat_t * p_t_list[t])
             true_marginal_gain = compute_expected_marginal_gain(df, u_hat_t, u_t, model_class)
             true_cei.append(true_marginal_gain)
-            if u_hat_t * p_t < true_marginal_gain and not miscovered_i:
+            if u_hat_t * p_t_list[t] < true_marginal_gain and not miscovered_i:
                 miscovered += 1
                 miscovered_i = True
+
+            # Infinite data
+            inf_data_i_t = inf_data_i_t if u_t_infinte_data < resampled_df.loc[t, f"{model_class}_df_SRG"] else t
+            u_t_infinte_data = resampled_df.loc[inf_data_i_t, f"{model_class}_df_SRG"]
+            bound_no_assm_inf_data.append(u_t_infinte_data * p_t_list[t])
+            true_marginal_gain_infinte_data = compute_expected_marginal_gain_inf_data(df, u_t_infinte_data, u_t_infinte_data, model_class)
+            true_cei_inf_data.append(true_marginal_gain_infinte_data)
+            if u_t_infinte_data * p_t_list[t] < true_marginal_gain_infinte_data and not miscovered_inf_data_i:
+                miscovered_inf_data += 1
+                miscovered_inf_data_i = True
         no_assm_df.loc[b] = bound_no_assm
         true_cei_df.loc[b] = true_cei
 
+        no_assm_inf_data_df.loc[b] = bound_no_assm_inf_data
+        true_cei_inf_data_df.loc[b] = true_cei_inf_data
+
     no_assm_means = no_assm_df.mean(axis=0)
     true_cei_means = true_cei_df.mean(axis=0)
+    no_assm_inf_data_means = no_assm_inf_data_df.mean(axis=0)
+    true_cei_inf_data_means = true_cei_inf_data_df.mean(axis=0)
 
     no_assm_sds = no_assm_df.std(axis=0)
     true_cei_sds = true_cei_df.std(axis=0)
+    no_assm_inf_data_sds = no_assm_inf_data_df.std(axis=0)
+    true_cei_inf_data_sds = true_cei_inf_data_df.std(axis=0)
 
     saved_data = {
+        # Finite data
         "no_assm_means": no_assm_means.to_list(),
         "true_cei_means": true_cei_means.to_list(),
         "no_assm_sds": no_assm_sds.to_list(),
         "true_cei_sds": true_cei_sds.to_list(),
         "miscovered": miscovered/B,
+        # Infinite data
+        "no_assm_inf_data_means": no_assm_inf_data_means.to_list(),
+        "true_cei_inf_data_means": true_cei_inf_data_means.to_list(),
+        "no_assm_inf_data_sds": no_assm_inf_data_sds.to_list(),
+        "true_cei_inf_data_sds": true_cei_inf_data_sds.to_list(),
+        "miscovered_inf_data": miscovered_inf_data/B,
     }
     saved_data = pd.DataFrame(saved_data)
-    # file_path = f'algo_data/{dataset}_{model_class}_{i}.csv'
-    # if os.path.exists(file_path):
-    #     existing_data = pd.read_csv(file_path, index_col=0)
-    #     for col in saved_data.columns:
-    #         existing_data[col] = saved_data[col]
-    #     saved_data = existing_data
     saved_data.to_csv(f'algo_data/{dataset}_{model_class}_{i}.csv')
         
 def compute_mrl_assm_and_true_cei(df, B, T, model_class, i):
@@ -97,9 +124,9 @@ def compute_mrl_assm_and_true_cei(df, B, T, model_class, i):
         Deltas = []
         for t in range(T_1, T + T_1):
             if t == T_1:
-                p_t = 1 - math.exp(-1/delta)
+                p_t = 1 - math.exp(-3/delta)
             else:
-                p_t = 1 - ((t - T_1)/delta+ 1)**(-1/(t - T_1))
+                p_t = 1 - (3*(t - T_1)/delta+ 1)**(-1/(t - T_1))
             i_t = i_t if u_hat_t < resampled_df.loc[t, f"{model_class}_eval_SRG"] else t
             q_hat_t = resampled_df.loc[t, f"{model_class}_eval_SRG"]
             if C - q_hat_t > 0:
@@ -142,8 +169,11 @@ def compute_mrl_assm_and_true_cei(df, B, T, model_class, i):
 
 if __name__ == "__main__":
     delta = 0.05
-
-    B = 1000
+    run_with_fairlearn = True
+    model_classes = ['logistic', 'RF', 'gbt']
+    if run_with_fairlearn:
+        model_classes = ['fl_' + model_class for model_class in model_classes]
+    B = 5000
     T = 100 # number of model training iterations
     parser = argparse.ArgumentParser()
     parser.add_argument('-i', type=int, required=False, dest='fileno')
@@ -155,6 +185,9 @@ if __name__ == "__main__":
         print(dataset)
         for model_class in model_classes:
             print(model_class)
-            results = pd.read_csv(f'results_data/{dataset}_results_{fileno}.csv')
+            if run_with_fairlearn:
+                results = pd.read_csv(f'results_data/{dataset}_fairlearn_results_{fileno}.csv')
+            else:
+                results = pd.read_csv(f'results_data/{dataset}_results_{fileno}.csv')
             compute_no_assm_and_true_cei(results, B, T, model_class, fileno)
-            # compute_mrl_assm_and_true_cei(results, B, T, model_class, fileno)
+            compute_mrl_assm_and_true_cei(results, B, T, model_class, fileno)
